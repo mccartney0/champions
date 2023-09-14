@@ -1,0 +1,123 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('Install Dependencies') {
+            steps {
+                sh 'cd "${WORKSPACE}"'
+                sh 'ls -lah'
+                nodejs(configId: '8f8ef77a-9974-4270-8bae-dfc3d2bd52ee', nodeJSInstallationName: 'Default') {
+                    sh '''
+                        echo FORCE_NPM_INSTALL: $FORCE_NPM_INSTALL
+                        PACKGE_LOCK_MD5=package-lock.md5
+
+                        if [ -f $PACKGE_LOCK_MD5 ] && [ $FORCE_NPM_INSTALL ]; then
+                            echo "Apaga o .md5"
+                            unlink $PACKGE_LOCK_MD5
+                        fi
+                    '''
+
+                    sh '''
+                        PACKGE_LOCK_MD5=package-lock.md5
+                        MD5_FROM_FILE=$(md5sum -c $PACKGE_LOCK_MD5 | cut -d " " -f2)
+
+                        if [ ! -f $PACKGE_LOCK_MD5 ] || [ $MD5_FROM_FILE != \'OK\' ]; then
+                            md5sum package-lock.json > package-lock.md5
+                            npm install --prefer-offline --no-audit
+                        fi
+                    '''
+                }
+            }
+        }
+
+        stage('Sonar Setup') {
+            when { expression { return fileExists ('sonar-project.properties') } }
+
+            steps {
+                script {
+                    withCredentials([string(credentialsId: "sonarqube_token", variable: "API_TOKEN")]) {
+                        sh '''
+                            SONAR_PROJECT_KEY=$(echo "a" | sed -n "/^sonar.projectKey/p" "./sonar-project.properties" | tail -n 1 | cut -d "=" -f2- | sed "s/^[[:space:]]*//;s/[[:space:]]*\$//")
+                            SONAR_PROJECT_NAME=$(echo "a" | sed -n "/^sonar.projectName/p" "./sonar-project.properties" | tail -n 1 | cut -d "=" -f2- | sed "s/^[[:space:]]*//;s/[[:space:]]*\$//")
+
+                            echo "Projeto existe?"
+                            response=$(curl -s -d "componentKey=$SONAR_PROJECT_KEY" -u $API_TOKEN: https://sonar.us.oracle.com/api/navigation/component | sed -n 's|.*"key":"\\([^"]*\\)".*|\\1|p')
+
+                            if [ "'$response'" != "'$SONAR_PROJECT_KEY'" ]; then
+                                echo "Cria o projeto"
+                                curl -s -X POST \
+                                    -d "name=$SONAR_PROJECT_NAME" \
+                                    -d "project=$SONAR_PROJECT_KEY" \
+                                    -u $API_TOKEN: https://sonar.us.oracle.com/api/projects/create
+
+                                echo "Atualiza Quality Gate"
+                                curl -s -X POST -F 'gateId=11162' -F "projectKey=$SONAR_PROJECT_KEY" -u $API_TOKEN: https://sonar.us.oracle.com/api/qualitygates/select
+
+                                echo "Atualiza Quality Profile"
+                                curl -s -X POST \
+                                    -F "project=$SONAR_PROJECT_KEY" \
+                                    -F 'qualityProfile=Sonar way Recommended' \
+                                    -F 'language=js' \
+                                    -u $API_TOKEN: https://sonar.us.oracle.com/api/qualityprofiles/add_project
+
+
+                                echo "Definindo Permissões"
+
+                                for USER in ${SONAR_ADMINS}; do
+                                    for PERMISSION in "admin" "codeviewer" "issueadmin" "scan" "user"; do
+                                        echo "$USER: $PERMISSION"
+
+                                        curl -s -X POST \
+                                            -F "login=$USER" \
+                                            -F "projectKey=$SONAR_PROJECT_KEY" \
+                                            -F "permission=$PERMISSION" \
+                                            -u ${API_TOKEN}: https://sonar.us.oracle.com/api/permissions/add_user
+                                    done
+                                done
+                            fi
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Sonar Analysis') {
+            when { expression { return fileExists ('sonar-project.properties') } }
+
+            steps {
+                script {
+                    scannerHome = tool 'Oracle_SonarQube_Scanner';
+                }
+
+                withSonarQubeEnv('Oracle_SonarQube_Scanner') {
+                    sh "${scannerHome}/bin/sonar-scanner"
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                nodejs(configId: '8f8ef77a-9974-4270-8bae-dfc3d2bd52ee', nodeJSInstallationName: 'Default') {
+                    sh 'npm run build:${DEPLOY_ENV}'
+                }
+            }
+        }
+
+        stage('Move to Env') {
+            steps {
+                nodejs(configId: '8f8ef77a-9974-4270-8bae-dfc3d2bd52ee', nodeJSInstallationName: 'Default') {
+                    sh 'node deploy-${DEPLOY_ENV}.js'
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            slackSend channel: 'innovaction-solutions-notifications', color: '#36a64f', message: "*SUCCESSFUL* \n ${env.JOB_NAME} (${DEPLOY_ENV} | ${BRANCH_NAME}) - #${env.BUILD_NUMBER} \n Started By: ${BUILD_USER} \n <${env.BUILD_URL}|Open Jenkins>"
+        }
+        failure {
+            slackSend channel: 'innovaction-solutions-notifications', color: '#bb2929', message: "*FAILED* \n ${env.JOB_NAME} (${DEPLOY_ENV} | ${BRANCH_NAME}) - #${env.BUILD_NUMBER} \n Started By: ${BUILD_USER} \n <${env.BUILD_URL}|Open Jenkins>"
+        }
+    }
+}
