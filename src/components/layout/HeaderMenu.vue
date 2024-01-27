@@ -63,13 +63,12 @@
       <div class="profile d-flex align-center">
         <v-avatar size="35">
           <img
-            v-if="user.email"
-            :src="getUserPicture(user.email)"
-            :alt="`${user.firstName} Photo`"
+            :src="user.avatar_url"
+            :alt="`${user.name} Photo`"
           />
         </v-avatar>
 
-        <span class="text-name">{{ user.firstName }} {{ user.lastName }}</span>
+        <span class="text-name" :title="user.login">{{ user.name }}</span>
       </div>
     </div>
   </div>

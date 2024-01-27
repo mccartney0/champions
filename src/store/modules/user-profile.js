@@ -18,7 +18,7 @@ const userProfile = {
         commit('SET_USER', {});
 
         try {
-          const { data } = await axios.get('/users/me');
+          const { data } = await axios.get('https://api.github.com/users/mccartney0');
 
           commit('SET_USER', data);
         } catch (error) {
